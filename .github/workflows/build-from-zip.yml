@@ -14,6 +14,11 @@ name: Build Element X from ZIP
 #
 # 说明：Android SDK 使用 ubuntu runner 自带版本（与 Element 官方 CI 一致），
 #       不再使用 android-actions/setup-android（老版本已与新 runner 不兼容）。
+#
+# 默认构建任务：:app:assembleGplayRelease（release 变体，用仓库内 debug.keystore 签名）
+# 手动触发时可覆盖 task，例如：
+#   :app:assembleFdroidRelease   F-Droid 版（不带 Firebase 推送）
+#   :app:assembleGplayDebug      调试版
 # ---------------------------------------------------------------------------
 
 on:
@@ -22,7 +27,7 @@ on:
       task:
         description: 'Gradle 构建任务'
         required: false
-        default: ':app:assembleGplayDebug'
+        default: ':app:assembleGplayRelease'
       zip_path:
         description: '仓库内 zip 路径（留空则自动在 source/ 下查找 *.zip）'
         required: false
@@ -156,7 +161,7 @@ jobs:
         working-directory: ${{ steps.src.outputs.project_root }}
         run: |
           chmod +x ./gradlew
-          ./gradlew ${{ github.event.inputs.task || ':app:assembleGplayDebug' }} $CI_GRADLE_ARG_PROPERTIES
+          ./gradlew ${{ github.event.inputs.task || ':app:assembleGplayRelease' }} $CI_GRADLE_ARG_PROPERTIES
         env:
           ELEMENT_ANDROID_MAPTILER_API_KEY: ${{ secrets.MAPTILER_KEY }}
           ELEMENT_ANDROID_MAPTILER_LIGHT_MAP_ID: ${{ secrets.MAPTILER_LIGHT_MAP_ID }}
