@@ -1,0 +1,148 @@
+name: Build Element X from ZIP
+
+# ---------------------------------------------------------------------------
+# 用途：仓库里只放「一个源码 zip」（比逐个上传 1 万多个文件快很多），
+#       本工作流负责解压 → 配置环境 → 构建 → 上传 APK 产物。
+#
+# 仓库目录建议：
+#   .github/workflows/build-from-zip.yml   <- 本文件
+#   source/element-x-src.zip               <- 源码 zip（顶层为 element-x/）
+#
+# 触发方式：
+#   1) 手动：Actions → "Build Element X from ZIP" → Run workflow
+#   2) 自动：推送更新了 source/ 下的 zip 时
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: 'Gradle 构建任务'
+        required: false
+        default: ':app:assembleGplayDebug'
+      zip_path:
+        description: '仓库内 zip 路径（留空则自动在 source/ 下查找 *.zip）'
+        required: false
+        default: ''
+  push:
+    paths:
+      - 'source/**'
+      - '.github/workflows/build-from-zip.yml'
+
+permissions:
+  contents: read
+
+env:
+  GRADLE_OPTS: >-
+    -Dorg.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8
+    -XX:+HeapDumpOnOutOfMemoryError -XX:+UseG1GC -Dkotlin.daemon.jvm.options=-Xmx3g
+
+jobs:
+  build:
+    name: Build APK from source zip
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 若把 zip 用 Git LFS 存储，需要拉取真实文件
+          lfs: true
+
+      - name: 释放磁盘空间
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+
+      - name: 定位并解压源码 zip
+        id: src
+        run: |
+          mkdir -p _extracted
+          ZIP="${{ github.event.inputs.zip_path }}"
+          # 支持：单个 zip / 分卷(zip -s: .z01+.zip) / 分割(.zip.001)
+          if [ -z "$ZIP" ] || [ ! -f "$ZIP" ]; then
+            main=$(ls source/*.zip 2>/dev/null | head -n 1 || true)
+            if [ -n "$main" ] && ls source/*.z[0-9]* >/dev/null 2>&1; then
+              echo "检测到分卷 zip，正在合并…"
+              cat $(ls source/*.z[0-9]* | sort) "$main" > _extracted/merged.zip
+              ZIP=_extracted/merged.zip
+            elif ls source/*.zip.[0-9]* >/dev/null 2>&1; then
+              echo "检测到分割 zip，正在合并…"
+              cat $(ls source/*.zip.[0-9]* | sort) > _extracted/merged.zip
+              ZIP=_extracted/merged.zip
+            else
+              ZIP="$main"
+            fi
+          fi
+          if [ -z "$ZIP" ] || [ "$ZIP" = "" ] || [ ! -f "$ZIP" ]; then
+            echo "::error::未找到 zip。请把源码 zip 放到 source/ 目录，或在手动触发时填写 zip_path。"
+            exit 1
+          fi
+          echo "使用 zip: $ZIP ($(du -h "$ZIP" | cut -f1))"
+          unzip -q "$ZIP" -d _extracted/out
+          ROOT=$(dirname "$(find _extracted/out -maxdepth 4 -name settings.gradle.kts | head -n 1)")
+          if [ -z "$ROOT" ] || [ "$ROOT" = "." ] || [ ! -d "$ROOT" ]; then
+            echo "::error::未在 zip 中找到包含 settings.gradle.kts 的项目根目录。"
+            exit 1
+          fi
+          echo "项目根目录: $ROOT"
+          echo "project_root=$ROOT" >> "$GITHUB_OUTPUT"
+
+      - name: 安装 JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: 配置 Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 确保 SDK 37 / build-tools 37
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platforms;android-37" "build-tools;37.0.0" >/dev/null 2>&1 \
+            || sdkmanager "platforms;android-37.0" "build-tools;37.0.0" >/dev/null 2>&1 \
+            || echo "::warning::sdkmanager 未安装成功，改用 runner 自带的 SDK"
+          sdkmanager --list_installed 2>/dev/null | grep -E 'platforms;android-3|build-tools;3' || true
+
+      - name: 配置 Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: 构建
+        working-directory: ${{ steps.src.outputs.project_root }}
+        run: |
+          chmod +x ./gradlew
+          ./gradlew ${{ github.event.inputs.task || ':app:assembleGplayDebug' }} \
+            --stacktrace --no-configuration-cache
+        env:
+          ELEMENT_ANDROID_MAPTILER_API_KEY: ${{ secrets.MAPTILER_KEY }}
+          ELEMENT_ANDROID_MAPTILER_LIGHT_MAP_ID: ${{ secrets.MAPTILER_LIGHT_MAP_ID }}
+          ELEMENT_ANDROID_MAPTILER_DARK_MAP_ID: ${{ secrets.MAPTILER_DARK_MAP_ID }}
+          ELEMENT_ANDROID_SENTRY_DSN: ${{ secrets.ELEMENT_ANDROID_SENTRY_DSN }}
+          ELEMENT_SDK_SENTRY_DSN: ${{ secrets.ELEMENT_SDK_SENTRY_DSN }}
+          ELEMENT_CALL_SENTRY_DSN: ${{ secrets.ELEMENT_CALL_SENTRY_DSN }}
+          ELEMENT_CALL_POSTHOG_API_HOST: ${{ secrets.ELEMENT_CALL_POSTHOG_API_HOST }}
+          ELEMENT_CALL_POSTHOG_API_KEY: ${{ secrets.ELEMENT_CALL_POSTHOG_API_KEY }}
+          ELEMENT_CALL_RAGESHAKE_URL: ${{ secrets.ELEMENT_CALL_RAGESHAKE_URL }}
+
+      - name: 列出产物
+        working-directory: ${{ steps.src.outputs.project_root }}
+        run: |
+          echo "=== APK ==="
+          find app/build/outputs -name '*.apk' -exec ls -lh {} \; || true
+
+      - name: 上传 APK 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: elementx-apk
+          path: |
+            ${{ steps.src.outputs.project_root }}/app/build/outputs/apk/**/*.apk
+          if-no-files-found: warn
+          retention-days: 14
