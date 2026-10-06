@@ -11,6 +11,9 @@ name: Build Element X from ZIP
 # 触发方式：
 #   1) 手动：Actions → "Build Element X from ZIP" → Run workflow
 #   2) 自动：推送更新了 source/ 下的 zip 时
+#
+# 说明：Android SDK 使用 ubuntu runner 自带版本（与 Element 官方 CI 一致），
+#       不再使用 android-actions/setup-android（老版本已与新 runner 不兼容）。
 # ---------------------------------------------------------------------------
 
 on:
@@ -34,8 +37,9 @@ permissions:
 
 env:
   GRADLE_OPTS: >-
-    -Dorg.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8
-    -XX:+HeapDumpOnOutOfMemoryError -XX:+UseG1GC -Dkotlin.daemon.jvm.options=-Xmx3g
+    -Dorg.gradle.jvmargs=-Xmx8g -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8
+    -XX:+HeapDumpOnOutOfMemoryError -XX:+UseG1GC -Dkotlin.daemon.jvm.options=-Xmx4g
+  CI_GRADLE_ARG_PROPERTIES: --stacktrace --no-configuration-cache
 
 jobs:
   build:
@@ -45,13 +49,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # 若把 zip 用 Git LFS 存储，需要拉取真实文件
           lfs: true
 
       - name: 释放磁盘空间
-        uses: jlumbroso/free-disk-space@main
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
           tool-cache: true
           android: false
@@ -81,7 +85,7 @@ jobs:
               ZIP="$main"
             fi
           fi
-          if [ -z "$ZIP" ] || [ "$ZIP" = "" ] || [ ! -f "$ZIP" ]; then
+          if [ -z "$ZIP" ] || [ ! -f "$ZIP" ]; then
             echo "::error::未找到 zip。请把源码 zip 放到 source/ 目录，或在手动触发时填写 zip_path。"
             exit 1
           fi
@@ -96,31 +100,53 @@ jobs:
           echo "project_root=$ROOT" >> "$GITHUB_OUTPUT"
 
       - name: 安装 JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
           java-version: '21'
 
-      - name: 配置 Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: 确保 SDK 37 / build-tools 37
+      - name: 准备 Android SDK（使用 runner 自带）
         run: |
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager "platforms;android-37" "build-tools;37.0.0" >/dev/null 2>&1 \
-            || sdkmanager "platforms;android-37.0" "build-tools;37.0.0" >/dev/null 2>&1 \
-            || echo "::warning::sdkmanager 未安装成功，改用 runner 自带的 SDK"
-          sdkmanager --list_installed 2>/dev/null | grep -E 'platforms;android-3|build-tools;3' || true
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [ -z "$SDK" ] || [ ! -d "$SDK" ]; then
+            for c in /usr/local/lib/android/sdk "$HOME/Android/Sdk" /opt/android-sdk; do
+              if [ -d "$c" ]; then SDK="$c"; break; fi
+            done
+          fi
+          if [ -z "$SDK" ] || [ ! -d "$SDK" ]; then
+            echo "::error::找不到 Android SDK（runner 未预装且未设置 ANDROID_HOME）"
+            exit 1
+          fi
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "SDK = $SDK"
+          echo "--- platforms ---"; ls "$SDK/platforms" 2>/dev/null || true
+          echo "--- build-tools ---"; ls "$SDK/build-tools" 2>/dev/null || true
+          # 仅当缺少 API 37 时才尝试补装（非致命）
+          if ! ls -d "$SDK"/platforms/android-37* >/dev/null 2>&1; then
+            SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+            if [ ! -x "$SM" ]; then
+              SM=$(ls "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | sort -V | tail -n 1)
+            fi
+            if [ -z "$SM" ] || [ ! -x "$SM" ]; then SM="$(command -v sdkmanager || true)"; fi
+            if [ -n "$SM" ]; then
+              echo "缺少 API 37，尝试安装 platforms;android-37.0 / build-tools;37.0.0"
+              yes | "$SM" --licenses >/dev/null 2>&1 || true
+              "$SM" "platforms;android-37.0" "build-tools;37.0.0" >/dev/null 2>&1 || echo "::warning::SDK 37 安装失败，将使用 runner 自带版本"
+              ls -d "$SDK"/platforms/android-37* 2>/dev/null || true
+            else
+              echo "::warning::未找到 sdkmanager，跳过补装"
+            fi
+          fi
 
       - name: 配置 Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
 
       - name: 构建
         working-directory: ${{ steps.src.outputs.project_root }}
         run: |
           chmod +x ./gradlew
-          ./gradlew ${{ github.event.inputs.task || ':app:assembleGplayDebug' }} \
-            --stacktrace --no-configuration-cache
+          ./gradlew ${{ github.event.inputs.task || ':app:assembleGplayDebug' }} $CI_GRADLE_ARG_PROPERTIES
         env:
           ELEMENT_ANDROID_MAPTILER_API_KEY: ${{ secrets.MAPTILER_KEY }}
           ELEMENT_ANDROID_MAPTILER_LIGHT_MAP_ID: ${{ secrets.MAPTILER_LIGHT_MAP_ID }}
@@ -139,7 +165,7 @@ jobs:
           find app/build/outputs -name '*.apk' -exec ls -lh {} \; || true
 
       - name: 上传 APK 产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: elementx-apk
           path: |
