@@ -91,12 +91,22 @@ jobs:
           fi
           echo "使用 zip: $ZIP ($(du -h "$ZIP" | cut -f1))"
           unzip -q "$ZIP" -d _extracted/out
-          ROOT=$(dirname "$(find _extracted/out -maxdepth 4 -name settings.gradle.kts | head -n 1)")
+          # 定位项目根：优先取「最浅」的 gradlew 所在目录。
+          # 注意：element-x/plugins 里也有一个 settings.gradle.kts，但它没有 gradlew，
+          #       所以不能用「第一个 settings.gradle.kts」来定位，必须按路径深度取最浅的。
+          ROOT=$(find _extracted/out -maxdepth 4 -type f -name gradlew | awk -F/ '{print NF, $0}' | sort -n | head -n 1 | cut -d' ' -f2-)
+          ROOT=$(dirname "$ROOT")
           if [ -z "$ROOT" ] || [ "$ROOT" = "." ] || [ ! -d "$ROOT" ]; then
-            echo "::error::未在 zip 中找到包含 settings.gradle.kts 的项目根目录。"
+            # 回退：取最浅的 settings.gradle.kts 所在目录
+            ROOT=$(find _extracted/out -maxdepth 4 -name settings.gradle.kts | awk -F/ '{print NF, $0}' | sort -n | head -n 1 | cut -d' ' -f2-)
+            ROOT=$(dirname "$ROOT")
+          fi
+          if [ -z "$ROOT" ] || [ "$ROOT" = "." ] || [ ! -d "$ROOT" ]; then
+            echo "::error::未在 zip 中找到项目根目录（应含 gradlew / settings.gradle.kts）。"
             exit 1
           fi
           echo "项目根目录: $ROOT"
+          echo "--- 该目录内容 ---"; ls "$ROOT" | head -20
           echo "project_root=$ROOT" >> "$GITHUB_OUTPUT"
 
       - name: 安装 JDK 21
